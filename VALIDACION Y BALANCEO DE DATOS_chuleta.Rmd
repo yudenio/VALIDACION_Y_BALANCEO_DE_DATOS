@@ -1,0 +1,1126 @@
+---
+title: "VALIDACION Y BALANCEO DE DATOS"
+output: github_document
+date: "2024-04-09"
+---
+
+```{r setup, include=FALSE}
+rm(list = ls())  # Elimina todos los objetos del entorno de trabajo actual.
+
+graphics.off()  # Cierra todas las ventanas gráficas abiertas.
+
+cat("\014")  # Limpia la consola en RStudio.
+
+options(scipen = 999)  # Configura R para evitar la notación científica al imprimir números.
+
+options(digits = 3)    # Configura R para imprimir números con 3 decimales.
+
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))  # Establece el directorio de trabajo al directorio del documento R activo en RStudio.
+
+getwd()  # Imprime el directorio de trabajo actual.
+
+library(pacman)  # Carga la biblioteca 'pacman' para la gestión de paquetes.
+
+p_load(caret, caTools, ggplot2, MLmetrics, yardstick, 
+       dplyr, pROC, tidyr, performanceEstimation)  # Carga las bibliotecas especificadas. Si no están instaladas, 'pacman' las instalará antes de cargarlas.
+
+```
+
+# Predicción de fuga de clientes de una entidad financiera  
+Se tienen datos de un año del producto CTS (compensación por
+tiempo de servicios) de 5533 clientes en todas las agencias
+de una entidad financiera.   
+
+Variables predictoras:  
+Tasa      	      Tasa de interés de la cuenta CTS  
+Saldo_soles	      Monto de Saldo de la cuenta CTS, en Soles.  
+Edad	            Edad del cliente en años  
+EstadoCivil	      Estado Civil: Div.Sol.Viu = Divorciado,   
+                                               Soltero y Viudo y   
+                                 Cas.Conv = Casado, Conviviente  
+Región	          Zona a la que pertenece el cliente:   
+                   NORTE.SUR, ORIENTE, CENTRO, LIMA_CALLAO  
+CrossSell     	  Número de productos vigentes con el banco,   
+                   tanto pasivos o activos  
+Ratio.Ant         Ratio Ant_Cts / Ant_Banco    
+Ant_Banco	    Tiempo de antigüedad del cliente (en meses)  
+Ant_Cts	      Tiempo de antigüedad de la cuenta CTS (en meses)  
+
+Variable dependiente:  
+Fuga              0 = cliente no fugado, 1 = cliente fugado  
+
+```{r eval=FALSE, include=FALSE}
+# Se tienen datos de un año del producto CTS (compensación por
+# tiempo de servicios) de 5533 clientes en todas las agencias
+# de una entidad financiera. 
+#
+# Variables predictoras:
+# Tasa      	      Tasa de interés de la cuenta CTS
+# Saldo_soles	      Monto de Saldo de la cuenta CTS, en Soles.
+# Edad	            Edad del cliente en años
+# EstadoCivil	      Estado Civil: Div.Sol.Viu = Divorciado, 
+#                                               Soltero y Viudo y 
+#                                 Cas.Conv = Casado, Conviviente
+# Región	          Zona a la que pertenece el cliente: 
+#                   NORTE.SUR, ORIENTE, CENTRO, LIMA_CALLAO
+# CrossSell     	  Número de productos vigentes con el banco, 
+#                   tanto pasivos o activos
+# Ratio.Ant         Ratio Ant_Cts / Ant_Banco  
+#     Ant_Banco	    Tiempo de antigüedad del cliente (en meses)
+#     Ant_Cts	      Tiempo de antigüedad de la cuenta CTS (en meses)
+#
+# Variable dependiente:
+# Fuga              0 = cliente no fugado, 1 = cliente fugado
+```
+
+# Lectura de datos
+```{r include=FALSE}
+# Lectura de datos --------------------------------------------
+datos.cts <- read.table("fuga_desbalanceada_cts.csv",
+                        sep = ";", dec = ",",
+                        header = T, stringsAsFactors = T)
+# Lee el archivo 'fuga_desbalanceada_cts.csv' y lo almacena en 'datos.cts'. 
+# Los datos se separan por ';', los decimales se indican con ',' y las cadenas de texto se convierten en factores.
+
+str(datos.cts)
+# Muestra la estructura del objeto 'datos.cts'.
+
+datos.cts$Id <- NULL
+# Elimina la columna 'Id' de 'datos.cts'.
+
+datos.cts$Fuga <- as.factor(datos.cts$Fuga)
+# Convierte la columna 'Fuga' de 'datos.cts' en un factor.
+
+levels(datos.cts$Fuga) <- c("No_Fuga", "Si_Fuga")
+# Recodifica los niveles del factor 'Fuga' a 'No_Fuga' y 'Si_Fuga'.
+
+addmargins(table(datos.cts$Fuga))
+# Crea una tabla de frecuencias de 'Fuga' y añade los márgenes (totales).
+
+round(prop.table(table(datos.cts$Fuga)) * 100, 2)
+# Crea una tabla de proporciones de 'Fuga', la multiplica por 100 para obtener porcentajes y redondea a 2 decimales.
+
+contrasts(datos.cts$Fuga)
+# Muestra los contrastes utilizados para codificar 'Fuga' en los modelos lineales.
+
+datos.cts$Fuga <- relevel(datos.cts$Fuga, ref = "No_Fuga") 
+# Cambia la categoría de referencia de 'Fuga' a 'No_Fuga'.
+
+contrasts(datos.cts$Fuga)
+# Muestra los nuevos contrastes utilizados para codificar 'Fuga' en los modelos lineales.
+```
+
+
+# Selección de muestra de entrenamiento (80%) y de evaluación (20%)
+
+```{r}
+# Selección de muestra de entrenamiento (80%) y de evaluación (20%) ----
+library(caret)  # Carga la biblioteca 'caret' para el análisis de datos.
+
+set.seed(2024)  # Establece la semilla del generador de números aleatorios para que los resultados sean reproducibles.
+
+index <- createDataPartition(datos.cts$Fuga,   # Es el target 
+                             p = 0.8, list = FALSE)
+# Crea un índice para dividir los datos en un conjunto de entrenamiento (80%) y un conjunto de evaluación (20%).
+
+imbal_train <- datos.cts[ index, ]  # 4427 
+# Crea el conjunto de entrenamiento utilizando el índice.
+
+imbal_testing <- datos.cts[-index, ]  # 1106 (no se balancea)
+# Crea el conjunto de evaluación utilizando el índice.
+
+addmargins(table(datos.cts$Fuga))
+# Crea una tabla de frecuencias de 'Fuga' en los datos originales y añade los márgenes (totales).
+
+round(prop.table(table(datos.cts$Fuga)) * 100, 2)
+# Crea una tabla de proporciones de 'Fuga' en los datos originales, la multiplica por 100 para obtener porcentajes y redondea a 2 decimales.
+
+addmargins(table(imbal_train$Fuga))
+# Crea una tabla de frecuencias de 'Fuga' en el conjunto de entrenamiento y añade los márgenes (totales).
+
+round(prop.table(table(imbal_train$Fuga)) * 100, 2)
+# Crea una tabla de proporciones de 'Fuga' en el conjunto de entrenamiento, la multiplica por 100 para obtener porcentajes y redondea a 2 decimales.
+
+addmargins(table(imbal_testing$Fuga))
+# Crea una tabla de frecuencias de 'Fuga' en el conjunto de evaluación y añade los márgenes (totales).
+
+round(prop.table(table(imbal_testing$Fuga)) * 100, 2)
+# Crea una tabla de proporciones de 'Fuga' en el conjunto de evaluación, la multiplica por 100 para obtener porcentajes y redondea a 2 decimales.
+
+```
+
+
+## 1. Sin balancear (imbal_train)
+
+```{r}
+# 1. Sin balancear (imbal_train) ------------------------------
+# No se muestra ninguna operación para este paso en el código proporcionado.
+
+
+```
+
+## 2. Undersampling (under_train)
+
+```{r}
+# 2. Undersampling (under_train) ------------------------------
+set.seed(2024)  # Establece la semilla del generador de números aleatorios para que los resultados sean reproducibles.
+under_train <- downSample(x = imbal_train[, c(1:7)], # predictoras
+                          y = imbal_train$Fuga,      # target
+                          yname = "Fuga") # Nombre columna target
+# Realiza un muestreo descendente (undersampling) en los datos de entrenamiento.
+
+addmargins(table(under_train$Fuga))
+# Crea una tabla de frecuencias de 'Fuga' en el conjunto de entrenamiento después del muestreo descendente y añade los márgenes (totales).
+
+
+```
+
+## 3. OverSampling (over_train)
+
+```{r}
+# 3. OverSampling (over_train) --------------------------------
+set.seed(2024)  # Establece la semilla del generador de números aleatorios para que los resultados sean reproducibles.
+over_train <- upSample(x = imbal_train[, c(1:7)],
+                       y = imbal_train$Fuga,
+                       yname = "Fuga")
+# Realiza un muestreo ascendente (oversampling) en los datos de entrenamiento.
+
+addmargins(table(over_train$Fuga))
+# Crea una tabla de frecuencias de 'Fuga' en el conjunto de entrenamiento después del muestreo ascendente y añade los márgenes (totales).
+
+
+```
+
+## 4. SMOTE (smote_train)
+
+```{r}
+# 4. SMOTE (smote_train) --------------------------------------
+#library(performanceEstimation)        # Carga la biblioteca 'performanceEstimation'.
+set.seed(2024)  # Establece la semilla del generador de números aleatorios para que los resultados sean reproducibles.
+smote_train <- smote(Fuga ~ ., 
+                     data = imbal_train, 
+                     perc.over  = 2,    # SMOTE          (clase minoritaria)
+                     perc.under = 1.5)  # Undersampling  (clase mayoritaria)                    
+# Aplica la técnica SMOTE para el balanceo de clases en los datos de entrenamiento.
+
+addmargins(table(imbal_train$Fuga))
+# Crea una tabla de frecuencias de 'Fuga' en el conjunto de entrenamiento original y añade los márgenes (totales).
+
+addmargins(table(smote_train$Fuga))
+# Crea una tabla de frecuencias de 'Fuga' en el conjunto de entrenamiento después de aplicar SMOTE y añade los márgenes (totales).
+
+
+```
+
+# Entrenar el modelo con validación cruzada con v = 10
+
+```{r}
+# Entrenar el modelo con validación cruzada con v = 10 --------
+# Usar como indicador el Accuracy
+
+# Relación de modelos 
+library(caret)   # Carga la biblioteca 'caret'.
+names(getModelInfo())
+# Muestra los nombres de todos los modelos disponibles en la biblioteca 'caret'.
+
+# Método de Validación Cruzada con k = 10 para todos los modelos  
+ctrl <- trainControl(method = "cv", number = 10)
+# Configura el método de control de entrenamiento para usar la validación cruzada con 10 pliegues.
+
+
+```
+
+## 1. Modelo con los datos originales (desbalanceados)
+
+```{r}
+# 1. Modelo con los datos originales (desbalanceados) ---------
+set.seed(2024)  # Establece la semilla del generador de números aleatorios para que los resultados sean reproducibles.
+modelo_imbal <- train(Fuga ~ ., 
+                      data = imbal_train, 
+                      method = "glm", family = "binomial", 
+                      trControl = ctrl,
+                      metric = "Accuracy")
+# Entrena un modelo de regresión logística con los datos de entrenamiento desbalanceados.
+
+modelo_imbal
+# Muestra el modelo entrenado.
+
+modelo_imbal$resample
+# Muestra los resultados de la validación cruzada del modelo.
+
+mean(modelo_imbal$resample$Accuracy)
+# Calcula la precisión media del modelo.
+
+modelo_imbal$finalModel
+# Muestra el modelo final.
+
+summary(modelo_imbal)
+# Muestra un resumen del modelo.
+
+
+```
+
+## 2. Modelo con los datos balanceados (undersampling)
+
+```{r}
+# 2. Modelo con los datos balanceados (undersampling) ---------
+set.seed(2024)  # Establece la semilla del generador de números aleatorios para que los resultados sean reproducibles.
+modelo_under  <- train(Fuga ~ ., 
+                       data = under_train, 
+                       method = "glm", family = "binomial", 
+                       trControl = ctrl, 
+                       metric = "Accuracy")
+# Entrena un modelo de regresión logística con los datos de entrenamiento balanceados mediante undersampling.
+
+modelo_under
+# Muestra el modelo entrenado.
+
+modelo_under$resample
+# Muestra los resultados de la validación cruzada del modelo.
+
+mean(modelo_under$resample$Accuracy)
+# Calcula la precisión media del modelo.
+
+
+```
+
+## 3. Modelo con los datos balanceados (oversampling)
+
+```{r}
+# 3. Modelo con los datos balanceados (oversampling) ----------
+set.seed(2024)  # Establece la semilla del generador de números aleatorios para que los resultados sean reproducibles.
+modelo_over    <- train(Fuga ~ ., 
+                        data = over_train, 
+                        method = "glm", family = "binomial", 
+                        trControl = ctrl, 
+                        metric = "Accuracy")
+# Entrena un modelo de regresión logística con los datos de entrenamiento balanceados mediante oversampling.
+
+modelo_over
+# Muestra el modelo entrenado.
+
+modelo_over$resample
+# Muestra los resultados de la validación cruzada del modelo.
+
+mean(modelo_over$resample$Accuracy)
+# Calcula la precisión media del modelo.
+
+
+```
+
+## 4. Modelo con los datos balanceados (SMOTE)
+
+```{r}
+# 4. Modelo con los datos balanceados (SMOTE) -----------------
+set.seed(2024)  # Establece la semilla del generador de números aleatorios para que los resultados sean reproducibles.
+modelo_smote      <- train(Fuga ~ ., 
+                           data = smote_train, 
+                           method = "glm", family = "binomial", 
+                           trControl = ctrl, 
+                           metric = "Accuracy")
+# Entrena un modelo de regresión logística con los datos de entrenamiento balanceados mediante SMOTE.
+
+modelo_smote
+# Muestra el modelo entrenado.
+
+modelo_smote$resample
+# Muestra los resultados de la validación cruzada del modelo.
+
+mean(modelo_smote$resample$Accuracy)
+# Calcula la precisión media del modelo.
+
+
+```
+
+## Comparando la muestras para los cuatro modelos
+
+```{r}
+# Comparando la muestras para los cuatro modelos --------------
+modelos  <- list(sin_balancear = modelo_imbal,
+                 under    = modelo_under,
+                 over     = modelo_over,
+                 SMOTE    = modelo_smote)
+# Crea una lista con los cuatro modelos.
+
+comparacion_modelos <- resamples(modelos)
+# Crea un objeto de comparación de modelos.
+
+summary(comparacion_modelos)
+# Muestra un resumen de la comparación de modelos.
+
+dotplot(comparacion_modelos, metric = "Accuracy")
+# Crea un gráfico de puntos de la precisión de los modelos.
+
+bwplot(comparacion_modelos, metric = "Accuracy")
+# Crea un gráfico de caja de la precisión de los modelos.
+
+
+```
+
+# Predicción de los modelos en la data testing
+
+```{r}
+# Predicción de los modelos en la data testing ----------------
+
+
+```
+
+## 1. Predicción del modelo_orig en la data testing
+
+```{r}
+# 1. Predicción del modelo_orig en la data testing ------------
+proba.modelo_imbal <- predict(modelo_imbal,
+                              newdata = imbal_testing, 
+                              type = "prob")
+# Predice las probabilidades de cada clase para el conjunto de prueba usando el modelo entrenado con datos desbalanceados.
+
+head(proba.modelo_imbal)
+# Muestra las primeras filas de las probabilidades predichas.
+
+proba.modelo_imbal <- proba.modelo_imbal[, 2]
+# Selecciona la segunda columna de las probabilidades predichas (probabilidad de la clase positiva).
+
+head(proba.modelo_imbal)
+# Muestra las primeras filas de las probabilidades de la clase positiva.
+
+clase.modelo_imbal <- predict(modelo_imbal,
+                              newdata = imbal_testing)
+# Predice las clases para el conjunto de prueba usando el modelo entrenado con datos desbalanceados.
+
+head(clase.modelo_imbal)
+# Muestra las primeras filas de las clases predichas.
+
+tabla1  <- table(Predicho = clase.modelo_imbal,
+                 Real     = imbal_testing$Fuga)
+# Crea una tabla de contingencia de las clases predichas y reales.
+
+addmargins(tabla1)
+# Añade los márgenes a la tabla de contingencia.
+
+result1 <- caret::confusionMatrix(clase.modelo_imbal,
+                                  imbal_testing$Fuga,
+                                  positive = "Si_Fuga")
+# Calcula la matriz de confusión y las métricas de clasificación.
+
+result1
+# Muestra la matriz de confusión y las métricas de clasificación.
+
+result1$byClass["Sensitivity"] 
+# Muestra la sensibilidad del modelo.
+
+result1$byClass["Specificity"] 
+# Muestra la especificidad del modelo.
+
+result1$overall["Accuracy"]
+# Muestra la precisión del modelo.
+
+result1$byClass["Balanced Accuracy"]
+# Muestra la precisión balanceada del modelo.
+
+# Curva ROC y AUC
+library(caTools)
+colAUC(proba.modelo_imbal,
+       imbal_testing$Fuga,
+       plotROC = TRUE) -> auc1
+# Calcula el área bajo la curva ROC y muestra la curva ROC.
+
+abline(0, 1, col = "red")
+# Añade la línea diagonal al gráfico de la curva ROC.
+
+auc1
+# Muestra el área bajo la curva ROC.
+
+# Log-Loss
+library(MLmetrics)
+real <- as.numeric(imbal_testing$Fuga)  # El target
+real <- ifelse(real == 2, 1, 0)
+LogLoss(proba.modelo_imbal, real)  -> logloss1
+# Calcula la pérdida logarítmica del modelo.
+
+logloss1
+# Muestra la pérdida logarítmica del modelo.
+
+
+
+```
+
+## 2. Predicción del modelo_under en la data testing
+
+```{r}
+# 2. Predicción del modelo_under en la data testing -----------
+proba.modelo_under <- predict(modelo_under,
+                              newdata = imbal_testing, 
+                              type = "prob")
+# Predice las probabilidades de cada clase para el conjunto de prueba usando el modelo entrenado con datos balanceados mediante undersampling.
+
+head(proba.modelo_under)
+# Muestra las primeras filas de las probabilidades predichas.
+
+proba.modelo_under <- proba.modelo_under[, 2]
+# Selecciona la segunda columna de las probabilidades predichas (probabilidad de la clase positiva).
+
+head(proba.modelo_under)
+# Muestra las primeras filas de las probabilidades de la clase positiva.
+
+clase.modelo_under <- predict(modelo_under,
+                              newdata = imbal_testing )
+# Predice las clases para el conjunto de prueba usando el modelo entrenado con datos balanceados mediante undersampling.
+
+head(clase.modelo_under)
+# Muestra las primeras filas de las clases predichas.
+
+tabla2  <- table(Predicho = clase.modelo_under,
+                 Real     = imbal_testing$Fuga)
+# Crea una tabla de contingencia de las clases predichas y reales.
+
+addmargins(tabla2)
+# Añade los márgenes a la tabla de contingencia.
+
+result2 <- caret::confusionMatrix(clase.modelo_under,
+                                  imbal_testing$Fuga,
+                                  positive = "Si_Fuga")
+# Calcula la matriz de confusión y las métricas de clasificación.
+
+result2
+# Muestra la matriz de confusión y las métricas de clasificación.
+
+result2$byClass["Sensitivity"] 
+# Muestra la sensibilidad del modelo.
+
+result2$byClass["Specificity"] 
+# Muestra la especificidad del modelo.
+
+result2$overall["Accuracy"]
+# Muestra la precisión del modelo.
+
+result2$byClass["Balanced Accuracy"]
+# Muestra la precisión balanceada del modelo.
+
+# Curva ROC y AUC
+library(caTools)
+colAUC(proba.modelo_under,
+       imbal_testing$Fuga,
+       plotROC = TRUE) -> auc2
+# Calcula el área bajo la curva ROC y muestra la curva ROC.
+
+abline(0, 1, col = "red")
+# Añade la línea diagonal al gráfico de la curva ROC.
+
+auc2
+# Muestra el área bajo la curva ROC.
+
+# Log-Loss
+real <- as.numeric(imbal_testing$Fuga)
+real <- ifelse(real == 2, 1, 0)
+LogLoss(proba.modelo_under, real) -> logloss2
+# Calcula la pérdida logarítmica del modelo.
+
+logloss2
+# Muestra la pérdida logarítmica del modelo.
+
+
+
+```
+
+## 3. Predicción del modelo_over en la data testing
+
+```{r}
+# 3. Predicción del modelo_over en la data testing ------------
+proba.modelo_over <- predict(modelo_over, 
+                             newdata = imbal_testing, 
+                             type = "prob")
+# Predice las probabilidades de cada clase para el conjunto de prueba usando el modelo entrenado con datos balanceados mediante oversampling.
+
+head(proba.modelo_over)
+# Muestra las primeras filas de las probabilidades predichas.
+
+proba.modelo_over <- proba.modelo_over[, 2]
+# Selecciona la segunda columna de las probabilidades predichas (probabilidad de la clase positiva).
+
+head(proba.modelo_over)
+# Muestra las primeras filas de las probabilidades de la clase positiva.
+
+clase.modelo_over <- predict(modelo_over,
+                             newdata = imbal_testing )
+# Predice las clases para el conjunto de prueba usando el modelo entrenado con datos balanceados mediante oversampling.
+
+head(clase.modelo_over)
+# Muestra las primeras filas de las clases predichas.
+
+tabla3  <- table(Predicho = clase.modelo_over,
+                 Real     = imbal_testing$Fuga)
+# Crea una tabla de contingencia de las clases predichas y reales.
+
+addmargins(tabla3)
+# Añade los márgenes a la tabla de contingencia.
+
+result3 <- caret::confusionMatrix(clase.modelo_over,
+                                  imbal_testing$Fuga,
+                                  positive = "Si_Fuga")
+# Calcula la matriz de confusión y las métricas de clasificación.
+
+result3
+# Muestra la matriz de confusión y las métricas de clasificación.
+
+result3$byClass["Sensitivity"] 
+# Muestra la sensibilidad del modelo.
+
+result3$byClass["Specificity"] 
+# Muestra la especificidad del modelo.
+
+result3$overall["Accuracy"]
+# Muestra la precisión del modelo.
+
+result3$byClass["Balanced Accuracy"]
+# Muestra la precisión balanceada del modelo.
+
+# Curva ROC y AUC
+library(caTools)
+colAUC(proba.modelo_over,
+       imbal_testing$Fuga,
+       plotROC = TRUE) -> auc3
+# Calcula el área bajo la curva ROC y muestra la curva ROC.
+
+abline(0, 1, col = "red")
+# Añade la línea diagonal al gráfico de la curva ROC.
+
+auc3
+# Muestra el área bajo la curva ROC.
+
+# Log-Loss
+real <- as.numeric(imbal_testing$Fuga)
+real <- ifelse(real == 2, 1, 0)
+LogLoss(proba.modelo_over, real) -> logloss3
+# Calcula la pérdida logarítmica del modelo.
+
+logloss3
+# Muestra la pérdida logarítmica del modelo.
+
+
+
+
+```
+
+## 4. Predicción del modelo_smote en la data testing
+
+```{r}
+# 4. Predicción del modelo_smote en la data testing -----------
+proba.modelo_smote <- predict(modelo_smote, 
+                              newdata = imbal_testing, 
+                              type = "prob")
+# Predice las probabilidades de cada clase para el conjunto de prueba usando el modelo entrenado con datos balanceados mediante SMOTE.
+
+head(proba.modelo_smote)
+# Muestra las primeras filas de las probabilidades predichas.
+
+proba.modelo_smote <- proba.modelo_smote[, 2]
+# Selecciona la segunda columna de las probabilidades predichas (probabilidad de la clase positiva).
+
+head(proba.modelo_smote)
+# Muestra las primeras filas de las probabilidades de la clase positiva.
+
+clase.modelo_smote <- predict(modelo_smote,
+                              newdata = imbal_testing )
+# Predice las clases para el conjunto de prueba usando el modelo entrenado con datos balanceados mediante SMOTE.
+
+head(clase.modelo_smote)
+# Muestra las primeras filas de las clases predichas.
+
+tabla4  <- table(Predicho = clase.modelo_smote,
+                 Real     = imbal_testing$Fuga)
+# Crea una tabla de contingencia de las clases predichas y reales.
+
+addmargins(tabla4)
+# Añade los márgenes a la tabla de contingencia.
+
+result4 <- caret::confusionMatrix(clase.modelo_smote,
+                                  imbal_testing$Fuga,
+                                  positive = "Si_Fuga")
+# Calcula la matriz de confusión y las métricas de clasificación.
+
+result4
+# Muestra la matriz de confusión y las métricas de clasificación.
+
+result4$byClass["Sensitivity"] 
+# Muestra la sensibilidad del modelo.
+
+result4$byClass["Specificity"] 
+# Muestra la especificidad del modelo.
+
+result4$overall["Accuracy"]
+# Muestra la precisión del modelo.
+
+result4$byClass["Balanced Accuracy"]
+# Muestra la precisión balanceada del modelo.
+
+# Curva ROC y AUC
+library(caTools)
+colAUC(proba.modelo_smote,
+       imbal_testing$Fuga,
+       plotROC = TRUE) -> auc4
+# Calcula el área bajo la curva ROC y muestra la curva ROC.
+
+abline(0, 1, col = "red")
+# Añade la línea diagonal al gráfico de la curva ROC.
+
+auc4
+# Muestra el área bajo la curva ROC.
+
+# Log-Loss
+real <- as.numeric(imbal_testing$Fuga)
+real <- ifelse(real == 2, 1, 0)
+LogLoss(proba.modelo_smote,real) -> logloss4
+# Calcula la pérdida logarítmica del modelo.
+
+logloss4
+# Muestra la pérdida logarítmica del modelo.
+
+
+```
+
+## 5. Encontrando punto de corte óptimo (umbral), modelo_orig
+
+```{r}
+# 5. Encontrando punto de corte óptimo (umbral), modelo_orig ----
+# Predice las probabilidades de las clases del modelo 'modelo_imbal' usando el conjunto de datos 'imbal_testing'
+proba.modelo_umbral1 <- predict(modelo_imbal, newdata = imbal_testing, type = "prob")
+# Selecciona la segunda columna de las probabilidades predichas, que corresponde a la clase de interés
+proba.modelo_umbral1 <- proba.modelo_umbral1[, 2]
+# Muestra las primeras 6 filas de las probabilidades predichas
+head(proba.modelo_umbral1)
+
+# Área bajo la curva
+# Carga la biblioteca pROC
+library(pROC)
+# Calcula la curva ROC y el área bajo la curva (AUC)
+roc1 <- roc(imbal_testing$Fuga, proba.modelo_umbral1)
+# Grafica la curva ROC
+plot(roc1, legacy.axes = TRUE, print.thres = TRUE)
+# Muestra el valor del AUC
+roc1$auc
+
+# Punto de corte óptimo con mayor
+# (sensibilidad + especificidad) usando pROC
+# Si se usa best, por defecto max(sensibilidad + especificidad)
+# Grafica la curva ROC con varias opciones de visualización
+plot.roc(imbal_testing$Fuga, proba.modelo_umbral1, 
+         xlab = "1 - Especificidad", 
+         ylab = "Sensibilidad", 
+         legacy.axes = TRUE,
+         col = "blue",
+         max.auc.polygon = TRUE,
+         auc.polygon = TRUE,
+         auc.polygon.col = "lightblue",
+         print.auc = TRUE,
+         print.thres = TRUE)
+
+# Obtiene las coordenadas del punto de corte óptimo en la curva ROC
+pROC::coords(roc1, "best",
+             ret = c("threshold", "specificity", 
+                     "sensitivity", "accuracy"))
+
+# Almacena las coordenadas del punto de corte óptimo
+umbral1 <- pROC::coords(roc1, "best")
+# Muestra las coordenadas del punto de corte óptimo
+umbral1
+
+# Muestra el valor del umbral óptimo
+umbral1$threshold
+
+# Prediciendo la clase con el punto de corte óptimo
+# Predice la clase de interés usando el umbral óptimo
+clase.modelo_umbral1 <- ifelse(proba.modelo_umbral1 >= umbral1$threshold,
+                               "Si_Fuga", "No_Fuga")
+# Convierte las clases predichas a un factor con niveles específicos
+clase.modelo_umbral1 <- factor(clase.modelo_umbral1 ,
+                               levels = c("No_Fuga", "Si_Fuga")) 
+# Se deben especificar los levels, por defecto lo asigna 
+# alfabéticamente
+
+# Muestra los contrastes del factor de las clases predichas
+contrasts(clase.modelo_umbral1)
+
+# Crea una tabla de contingencia de las clases predichas y reales
+tabla5  <- table(Predicho = clase.modelo_umbral1,
+                 Real     = imbal_testing$Fuga)
+
+# Muestra la tabla de contingencia con márgenes
+addmargins(tabla5)
+
+# Calcula la matriz de confusión y varias métricas de rendimiento
+result5 <- caret::confusionMatrix(clase.modelo_umbral1,
+                                  imbal_testing$Fuga,
+                                  positive = "Si_Fuga")
+
+# Muestra la matriz de confusión y las métricas de rendimiento
+result5
+# Muestra la sensibilidad
+result5$byClass["Sensitivity"] 
+# Muestra la especificidad
+result5$byClass["Specificity"] 
+# Muestra la precisión
+result5$overall["Accuracy"]
+# Muestra la precisión balanceada
+result5$byClass["Balanced Accuracy"]
+
+# Curva ROC y AUC
+# Carga la biblioteca caTools
+library(caTools)
+# Calcula el AUC y grafica la curva ROC
+colAUC(proba.modelo_umbral1,
+       imbal_testing$Fuga,
+       plotROC = TRUE) -> auc5
+# Dibuja la línea diagonal de referencia
+abline(0, 1, col = "red")
+# Muestra el valor del AUC
+auc5
+
+# Log-Loss
+# Convierte la clase real a numérico y ajusta los niveles
+real <- as.numeric(imbal_testing$Fuga)
+real <- ifelse(real == 2, 1, 0)
+# Calcula la pérdida logarítmica (log-loss)
+LogLoss(proba.modelo_umbral1, real) -> logloss5
+# Muestra la pérdida logarítmica
+logloss5
+
+
+
+```
+
+# Resumiendo los 5 modelos
+
+```{r}
+# Resumiendo los 5 modelos ------------------------------------
+# Crea un vector con los nombres de los modelos
+modelo <- c("Sin Balancear","Undersampling", "Oversampling","SMOTE", "Sin balancear con umbral")
+
+# Crea un vector con los umbrales utilizados en cada modelo
+umbral <- c(0.5, 0.5, 0.5, 0.5, umbral1$threshold)
+
+# Crea un vector con la sensibilidad de cada modelo
+sensibilidad <- c(result1$byClass["Sensitivity"],
+                  result2$byClass["Sensitivity"],
+                  result3$byClass["Sensitivity"],
+                  result4$byClass["Sensitivity"],
+                  result5$byClass["Sensitivity"])
+
+# Crea un vector con la especificidad de cada modelo
+especificidad <- c(result1$byClass["Specificity"],
+                   result2$byClass["Specificity"],
+                   result3$byClass["Specificity"],
+                   result4$byClass["Specificity"],
+                   result5$byClass["Specificity"])
+
+# Crea un vector con la precisión (accuracy) de cada modelo
+accuracy <- c(result1$overall["Accuracy"],
+              result2$overall["Accuracy"],
+              result3$overall["Accuracy"],
+              result4$overall["Accuracy"],
+              result5$overall["Accuracy"])
+
+# Crea un vector con la precisión balanceada de cada modelo
+accuracy_bal <- c(result1$byClass["Balanced Accuracy"],
+                  result2$byClass["Balanced Accuracy"],
+                  result3$byClass["Balanced Accuracy"],
+                  result4$byClass["Balanced Accuracy"],
+                  result5$byClass["Balanced Accuracy"])
+
+# Crea un vector con la pérdida logarítmica (log-loss) de cada modelo
+logloss <- c(logloss1,
+             logloss2,
+             logloss3,
+             logloss4,
+             logloss5)
+
+# Crea un vector con el área bajo la curva ROC (AUC) de cada modelo
+auc <- c(auc1, auc2, auc3, auc4, auc5)
+
+# Crea un data frame que resume la información de los modelos
+comparacion <- data.frame(modelo, umbral, sensibilidad, especificidad, accuracy, accuracy_bal, auc, logloss)
+
+# Muestra el data frame 'comparacion' en la consola
+View(comparacion)
+
+
+
+
+
+
+
+
+
+
+#________________________
+# ________ \\|// ________
+# ________( o o ) _______ 
+# ___oo0____(_)____Ooo___
+#       Ejercicio 1      #
+# Añada a la comparación los modelos con umbral
+# para undersampling, oversampling y SMOTE
+
+```
+# CASO NUEVO CAMBIANDO DE UMBRAL
+
+## 1. Predicción del modelo_orig en la data testing
+
+```{r}
+# 1. Predicción del modelo_orig en la data testing ------------
+proba.modelo_imbal <- predict(modelo_imbal,
+                              newdata = imbal_testing, 
+                              type = "prob")
+proba.modelo_imbal <- proba.modelo_imbal[, 2]
+
+# Clase se predice con un punto de corte (umbral) de 0.5
+clase.modelo_imbal <- predict(modelo_imbal,
+                              newdata = imbal_testing)
+
+tabla1  <- table(Predicho = clase.modelo_imbal,
+                 Real     = imbal_testing$Fuga)
+
+addmargins(tabla1)
+
+result1 <- caret::confusionMatrix(clase.modelo_imbal,
+                                  imbal_testing$Fuga,
+                                  positive = "Si_Fuga")
+
+result1
+result1$byClass["Sensitivity"] 
+result1$byClass["Specificity"] 
+result1$overall["Accuracy"]
+result1$byClass["Balanced Accuracy"]
+
+
+```
+
+## 2. Predicción del modelo_under en la data testing
+
+```{r}
+# 2. Predicción del modelo_under en la data testing -----------
+proba.modelo_under <- predict(modelo_under,
+                              newdata = imbal_testing, 
+                              type = "prob")
+proba.modelo_under <- proba.modelo_under[, 2]
+
+clase.modelo_under <- predict(modelo_under,
+                              newdata = imbal_testing )
+
+tabla2  <- table(Predicho = clase.modelo_under,
+                 Real     = imbal_testing$Fuga)
+
+addmargins(tabla2)
+
+result2 <- caret::confusionMatrix(clase.modelo_under,
+                                  imbal_testing$Fuga,
+                                  positive = "Si_Fuga")
+
+result2
+result2$byClass["Sensitivity"] 
+result2$byClass["Specificity"] 
+result2$overall["Accuracy"]
+result2$byClass["Balanced Accuracy"]
+
+
+
+```
+
+## 3. Predicción del modelo_over en la data testing
+
+```{r}
+# 3. Predicción del modelo_over en la data testing ------------
+proba.modelo_over <- predict(modelo_over, 
+                             newdata = imbal_testing, 
+                             type = "prob")
+proba.modelo_over <- proba.modelo_over[, 2]
+
+clase.modelo_over <- predict(modelo_over,
+                             newdata = imbal_testing )
+
+tabla3  <- table(Predicho = clase.modelo_over,
+                 Real     = imbal_testing$Fuga)
+
+addmargins(tabla3)
+
+result3 <- caret::confusionMatrix(clase.modelo_over,
+                                  imbal_testing$Fuga,
+                                  positive = "Si_Fuga")
+
+result3
+result3$byClass["Sensitivity"] 
+result3$byClass["Specificity"] 
+result3$overall["Accuracy"]
+result3$byClass["Balanced Accuracy"]
+
+
+```
+
+## 4. Predicción del modelo_smote en la data testing
+
+```{r}
+# 4. Predicción del modelo_smote en la data testing -----------
+proba.modelo_smote <- predict(modelo_smote, 
+                              newdata = imbal_testing, 
+                              type = "prob")
+proba.modelo_smote <- proba.modelo_smote[, 2]
+
+clase.modelo_smote <- predict(modelo_smote,
+                              newdata = imbal_testing )
+head(clase.modelo_smote)
+
+tabla4  <- table(Predicho = clase.modelo_smote,
+                 Real     = imbal_testing$Fuga)
+
+addmargins(tabla4)
+
+result4 <- caret::confusionMatrix(clase.modelo_smote,
+                                  imbal_testing$Fuga,
+                                  positive = "Si_Fuga")
+
+result4
+result4$byClass["Sensitivity"] 
+result4$byClass["Specificity"] 
+result4$overall["Accuracy"]
+result4$byClass["Balanced Accuracy"]
+
+
+```
+
+## 5. Encontrando punto de corte óptimo (umbral), modelo_orig
+
+```{r}
+# 5. Encontrando punto de corte óptimo (umbral), modelo_orig ----
+proba.modelo_umbral1 <- predict(modelo_imbal,
+                                newdata = imbal_testing, 
+                                type = "prob")
+proba.modelo_umbral1 <- proba.modelo_umbral1[, 2]
+head(proba.modelo_umbral1)
+
+# Área bajo la curva
+library(pROC)
+roc1 <- roc(imbal_testing$Fuga, proba.modelo_umbral1)
+plot(roc1, legacy.axes = TRUE, print.thres = TRUE)
+roc1$auc
+
+# Punto de corte óptimo con mayor
+# (sensibilidad + especificidad) usando pROC
+# Si se usa best, por defecto max(sensibilidad + especificidad)
+plot.roc(imbal_testing$Fuga, proba.modelo_umbral1, 
+         xlab = "1 - Especificidad", 
+         ylab = "Sensibilidad", 
+         legacy.axes = TRUE,
+         col = "blue",
+         max.auc.polygon = TRUE,
+         auc.polygon = TRUE,
+         auc.polygon.col = "lightblue",
+         print.auc = TRUE,
+         print.thres = TRUE)
+
+pROC::coords(roc1, "best",
+             ret = c("threshold", "specificity", 
+                     "sensitivity", "accuracy"))
+
+umbral1 <- pROC::coords(roc1, "best")
+umbral1
+
+umbral1$threshold
+
+# Prediciendo la clase con el punto de corte óptimo
+clase.modelo_umbral1 <- ifelse(proba.modelo_umbral1 >= umbral1$threshold,
+                               "Si_Fuga", "No_Fuga")
+clase.modelo_umbral1 <- factor(clase.modelo_umbral1 ,
+                               levels = c("No_Fuga", "Si_Fuga")) 
+# Se deben especificar los levels, por defecto lo asigna 
+# alfabéticamente
+
+contrasts(clase.modelo_umbral1)
+
+tabla5  <- table(Predicho = clase.modelo_umbral1,
+                 Real     = imbal_testing$Fuga)
+
+addmargins(tabla5)
+
+result5 <- caret::confusionMatrix(clase.modelo_umbral1,
+                                  imbal_testing$Fuga,
+                                  positive = "Si_Fuga")
+
+result5
+result5$byClass["Sensitivity"] 
+result5$byClass["Specificity"] 
+result5$overall["Accuracy"]
+result5$byClass["Balanced Accuracy"]
+
+# Curva ROC y AUC
+library(caTools)
+colAUC(proba.modelo_umbral1,
+       imbal_testing$Fuga,
+       plotROC = TRUE) -> auc5
+abline(0, 1, col = "red")
+auc5
+
+# Log-Loss
+real <- as.numeric(imbal_testing$Fuga)
+real <- ifelse(real == 2, 1, 0)
+LogLoss(proba.modelo_umbral1, real) -> logloss5
+logloss5
+
+
+```
+
+## Resumiendo los 5 modelos
+
+```{r}
+# Resumiendo los 5 modelos ------------------------------------
+modelo        <- c("Sin Balancear","Undersampling",
+                   "Oversampling","SMOTE",
+                   "Sin balancear con umbral")
+
+umbral <- c(0.5, 0.5,
+            0.5, 0.5,
+            umbral1$threshold)
+
+sensibilidad  <- c(result1$byClass["Sensitivity"],
+                   result2$byClass["Sensitivity"],
+                   result3$byClass["Sensitivity"],
+                   result4$byClass["Sensitivity"],
+                   result5$byClass["Sensitivity"])
+
+especificidad <- c(result1$byClass["Specificity"],
+                   result2$byClass["Specificity"],
+                   result3$byClass["Specificity"],
+                   result4$byClass["Specificity"],
+                   result5$byClass["Specificity"])
+
+accuracy      <- c(result1$overall["Accuracy"],
+                   result2$overall["Accuracy"],
+                   result3$overall["Accuracy"],
+                   result4$overall["Accuracy"],
+                   result5$overall["Accuracy"])
+
+accuracy_bal    <- c(result1$byClass["Balanced Accuracy"],
+                     result2$byClass["Balanced Accuracy"],
+                     result3$byClass["Balanced Accuracy"],
+                     result4$byClass["Balanced Accuracy"],
+                     result5$byClass["Balanced Accuracy"])
+
+logloss       <- c(logloss1, logloss2, logloss3,
+                   logloss4, logloss5)
+
+auc           <- c(auc1, auc2, auc3, auc4, auc5)
+
+comparacion <- data.frame(modelo,
+                          umbral,
+                          sensibilidad,
+                          especificidad,
+                          accuracy,
+                          accuracy_bal,
+                          auc,
+                          logloss)
+
+View(comparacion)
+
+```
+
+
+
+
+
